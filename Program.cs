@@ -5,9 +5,9 @@ using System.Linq;
 namespace PolygonFactoryExample
 {
     /// <summary>
-    /// Представляє двовимірну точку.
+    /// Представляє двовимірну точку (немутуючий тип).
     /// </summary>
-    public struct Point2D
+    public readonly struct Point2D
     {
         public double X { get; }
         public double Y { get; }
@@ -22,6 +22,11 @@ namespace PolygonFactoryExample
             => new Point2D(a.X - b.X, a.Y - b.Y);
 
         public override string ToString() => $"({X:F2}, {Y:F2})";
+
+        public override bool Equals(object? obj)
+            => obj is Point2D p && Math.Abs(X - p.X) < 1e-9 && Math.Abs(Y - p.Y) < 1e-9;
+
+        public override int GetHashCode() => HashCode.Combine(X, Y);
     }
 
     /// <summary>
@@ -29,7 +34,7 @@ namespace PolygonFactoryExample
     /// </summary>
     public class Polygon
     {
-        private const double Epsilon = 1e-12;
+        private const double Tolerance = 1e-9;
 
         public IReadOnlyList<Point2D> Points { get; }
 
@@ -38,10 +43,23 @@ namespace PolygonFactoryExample
             var list = points?.ToList() ?? throw new ArgumentNullException(nameof(points));
             if (list.Count < 3)
                 throw new ArgumentException("Багатокутник повинен мати щонайменше 3 вершини.");
+
+            if (HasDuplicatePoints(list))
+                throw new ArgumentException("Багатокутник має повторювані вершини.");
+
             Points = list;
         }
 
-        /// <summary>Обчислює площу (за формулою Гауса).</summary>
+        private static bool HasDuplicatePoints(IList<Point2D> points)
+        {
+            var set = new HashSet<Point2D>();
+            foreach (var p in points)
+            {
+                if (!set.Add(p)) return true;
+            }
+            return false;
+        }
+
         public double Area()
         {
             double sum = 0;
@@ -54,7 +72,6 @@ namespace PolygonFactoryExample
             return Math.Abs(sum) * 0.5;
         }
 
-        /// <summary>Обчислює периметр багатокутника.</summary>
         public double Perimeter()
         {
             double sum = 0;
@@ -69,10 +86,7 @@ namespace PolygonFactoryExample
             return sum;
         }
 
-        /// <summary>
-        /// Перевіряє, чи є багатокутник опуклим.
-        /// Ігнорує колінеарні вершини.
-        /// </summary>
+        /// <summary>Перевіряє, чи багатокутник опуклий (ігнорує колінеарні точки).</summary>
         public bool IsConvex()
         {
             int n = Points.Count;
@@ -88,10 +102,9 @@ namespace PolygonFactoryExample
 
                 var ab = b - a;
                 var bc = c - b;
-
                 double crossZ = ab.X * bc.Y - ab.Y * bc.X;
 
-                if (Math.Abs(crossZ) <= Epsilon)
+                if (Math.Abs(crossZ) <= Tolerance)
                     continue;
 
                 int currentSign = crossZ > 0 ? 1 : -1;
@@ -104,9 +117,7 @@ namespace PolygonFactoryExample
             return true;
         }
 
-        /// <summary>
-        /// Перевірка на самоперетин.
-        /// </summary>
+        /// <summary>Перевірка на самоперетини, включно з колінеарними відрізками.</summary>
         public bool HasSelfIntersections()
         {
             int n = Points.Count;
@@ -117,6 +128,7 @@ namespace PolygonFactoryExample
 
                 for (int j = i + 1; j < n; j++)
                 {
+                    // Пропускаємо суміжні ребра
                     if (Math.Abs(i - j) <= 1 || (i == 0 && j == n - 1))
                         continue;
 
@@ -132,73 +144,94 @@ namespace PolygonFactoryExample
 
         private static bool SegmentsIntersect(Point2D p1, Point2D p2, Point2D p3, Point2D p4)
         {
-            static double Cross(Point2D a, Point2D b, Point2D c)
-                => (b.X - a.X) * (c.Y - a.Y) - (b.Y - a.Y) * (c.X - a.X);
+            static int Orientation(Point2D a, Point2D b, Point2D c)
+            {
+                double val = (b.Y - a.Y) * (c.X - b.X) - (b.X - a.X) * (c.Y - b.Y);
+                if (Math.Abs(val) < Tolerance) return 0; // колінеарні
+                return (val > 0) ? 1 : 2; // 1 = CW, 2 = CCW
+            }
 
-            double d1 = Cross(p1, p2, p3);
-            double d2 = Cross(p1, p2, p4);
-            double d3 = Cross(p3, p4, p1);
-            double d4 = Cross(p3, p4, p2);
+            static bool OnSegment(Point2D a, Point2D b, Point2D c)
+            {
+                return c.X <= Math.Max(a.X, b.X) + Tolerance && c.X >= Math.Min(a.X, b.X) - Tolerance &&
+                       c.Y <= Math.Max(a.Y, b.Y) + Tolerance && c.Y >= Math.Min(a.Y, b.Y) - Tolerance;
+            }
 
-            return ((d1 * d2 < 0) && (d3 * d4 < 0));
+            int o1 = Orientation(p1, p2, p3);
+            int o2 = Orientation(p1, p2, p4);
+            int o3 = Orientation(p3, p4, p1);
+            int o4 = Orientation(p3, p4, p2);
+
+            if (o1 != o2 && o3 != o4)
+                return true;
+
+            // спеціальні випадки — колінеарні точки
+            if (o1 == 0 && OnSegment(p1, p2, p3)) return true;
+            if (o2 == 0 && OnSegment(p1, p2, p4)) return true;
+            if (o3 == 0 && OnSegment(p3, p4, p1)) return true;
+            if (o4 == 0 && OnSegment(p3, p4, p2)) return true;
+
+            return false;
         }
 
         public override string ToString()
-            => $"Багатокутник із {Points.Count} вершинами, Площа={Area():F3}, Периметр={Perimeter():F3}";
+            => $"Багатокутник із {Points.Count} вершин, Площа={Area():F3}, Периметр={Perimeter():F3}";
     }
 
-    /// <summary>Інтерфейс абстрактної фабрики для створення багатокутників.</summary>
+    /// <summary>Тип багатокутника для вибору фабрики.</summary>
+    public enum PolygonKind
+    {
+        Convex,
+        Concave
+    }
+
     public interface IPolygonFactory
     {
-        Polygon Create(IList<Point2D> points);
+        Polygon Create(IEnumerable<Point2D> points);
     }
 
-    /// <summary>Фабрика для створення опуклих багатокутників.</summary>
     public class ConvexPolygonFactory : IPolygonFactory
     {
-        public Polygon Create(IList<Point2D> points)
+        public Polygon Create(IEnumerable<Point2D> points)
         {
             var poly = new Polygon(points);
             if (poly.HasSelfIntersections())
-                throw new ArgumentException("Багатокутник має самоперетини.");
+                throw new InvalidOperationException("Багатокутник має самоперетини.");
             if (!poly.IsConvex())
-                throw new ArgumentException("Передані точки не утворюють опуклий багатокутник.");
+                throw new InvalidOperationException("Передані точки не утворюють опуклий багатокутник.");
             return poly;
         }
     }
 
-    /// <summary>Фабрика для створення неопуклих багатокутників.</summary>
     public class ConcavePolygonFactory : IPolygonFactory
     {
-        public Polygon Create(IList<Point2D> points)
+        public Polygon Create(IEnumerable<Point2D> points)
         {
             var poly = new Polygon(points);
             if (poly.HasSelfIntersections())
-                throw new ArgumentException("Багатокутник має самоперетини.");
+                throw new InvalidOperationException("Багатокутник має самоперетини.");
             if (poly.IsConvex())
-                throw new ArgumentException("Передані точки утворюють опуклий багатокутник, очікувався неопуклий.");
+                throw new InvalidOperationException("Передані точки утворюють опуклий багатокутник, очікувався неопуклий.");
             return poly;
         }
     }
 
-    /// <summary>Продюсер фабрик для вибору типу багатокутника.</summary>
     public static class PolygonFactoryProducer
     {
-        public static IPolygonFactory GetFactory(bool convex)
-        {
-            return convex ? new ConvexPolygonFactory() as IPolygonFactory
-                          : new ConcavePolygonFactory();
-        }
+        private static readonly IPolygonFactory convexFactory = new ConvexPolygonFactory();
+        private static readonly IPolygonFactory concaveFactory = new ConcavePolygonFactory();
+
+        public static IPolygonFactory GetFactory(PolygonKind kind)
+            => kind == PolygonKind.Convex ? convexFactory : concaveFactory;
     }
 
-    internal class Program
+    public class Program
     {
-        private static int Main(string[] args)
+        public static int Main(string[] args)
         {
             try
             {
-                // Опуклий багатокутник — квадрат
-                var convexPoints = new List<Point2D>
+                var convexPoints = new[]
                 {
                     new Point2D(0,0),
                     new Point2D(2,0),
@@ -206,8 +239,7 @@ namespace PolygonFactoryExample
                     new Point2D(0,2)
                 };
 
-                // Неопуклий багатокутник — "стрілка"
-                var concavePoints = new List<Point2D>
+                var concavePoints = new[]
                 {
                     new Point2D(0,0),
                     new Point2D(2,0),
@@ -216,23 +248,19 @@ namespace PolygonFactoryExample
                     new Point2D(0,2)
                 };
 
-                var convexFactory = PolygonFactoryProducer.GetFactory(convex: true);
-                var concaveFactory = PolygonFactoryProducer.GetFactory(convex: false);
-
-                var convexPoly = convexFactory.Create(convexPoints);
+                var convexPoly = PolygonFactoryProducer.GetFactory(PolygonKind.Convex).Create(convexPoints);
                 Console.WriteLine("✅ Опуклий багатокутник створено:");
                 Console.WriteLine(convexPoly);
 
-                var concavePoly = concaveFactory.Create(concavePoints);
+                var concavePoly = PolygonFactoryProducer.GetFactory(PolygonKind.Concave).Create(concavePoints);
                 Console.WriteLine("\n✅ Неопуклий багатокутник створено:");
                 Console.WriteLine(concavePoly);
 
-                // Приклад помилки — передано опуклі точки у фабрику неопуклих
                 try
                 {
-                    concaveFactory.Create(convexPoints);
+                    PolygonFactoryProducer.GetFactory(PolygonKind.Concave).Create(convexPoints);
                 }
-                catch (ArgumentException ex)
+                catch (Exception ex)
                 {
                     Console.WriteLine($"\n⚠ Очікувана помилка: {ex.Message}");
                 }

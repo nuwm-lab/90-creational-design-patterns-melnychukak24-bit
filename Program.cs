@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Linq;
 
 namespace PolygonFactoryDemo
@@ -7,17 +8,8 @@ namespace PolygonFactoryDemo
     /// <summary>
     /// Точка на площині (2D)
     /// </summary>
-    public class Point2D
+    public readonly record struct Point2D(double X, double Y)
     {
-        public double X { get; }
-        public double Y { get; }
-
-        public Point2D(double x, double y)
-        {
-            X = x;
-            Y = y;
-        }
-
         public override string ToString() => $"({X:0.###}; {Y:0.###})";
     }
 
@@ -27,7 +19,9 @@ namespace PolygonFactoryDemo
     public abstract class Polygon
     {
         protected const double Tolerance = 1e-9;
-        public IReadOnlyList<Point2D> Points { get; }
+        protected const double ToleranceSq = Tolerance * Tolerance;
+
+        public ReadOnlyCollection<Point2D> Points { get; }
 
         protected Polygon(IEnumerable<Point2D> points)
         {
@@ -38,24 +32,26 @@ namespace PolygonFactoryDemo
             if (HasDuplicatePoints(list))
                 throw new ArgumentException("Багатокутник містить повторювані точки.");
 
-            Points = list;
+            Points = list.AsReadOnly();
         }
 
         /// <summary>
-        /// Перевіряє, чи полігон є опуклим
+        /// Визначає, чи полігон опуклий.
+        /// Якщо всі крос-продукти ≈ 0 (усі точки колінеарні), повертає false.
         /// </summary>
         protected static bool IsConvex(IList<Point2D> pts)
         {
             bool? sign = null;
             int n = pts.Count;
+
             for (int i = 0; i < n; i++)
             {
                 var a = pts[i];
                 var b = pts[(i + 1) % n];
                 var c = pts[(i + 2) % n];
 
-                double cross = CrossProductZ(a, b, c);
-                if (Math.Abs(cross) < Tolerance) continue;
+                double cross = CrossZ(a, b, c);
+                if (Math.Abs(cross) < Tolerance) continue; // колінеарність
 
                 bool currentSign = cross > 0;
                 if (sign == null)
@@ -64,12 +60,12 @@ namespace PolygonFactoryDemo
                     return false;
             }
 
-            // Додаткова перевірка на виродженість
+            // Якщо всі точки колінеарні або площа ≈ 0 — не вважаємо опуклим
             return Math.Abs(CalculateArea(pts)) > Tolerance;
         }
 
         /// <summary>
-        /// Перевірка на дублікати точок із допуском
+        /// Перевірка на дублікати точок із урахуванням допуску
         /// </summary>
         private static bool HasDuplicatePoints(IList<Point2D> points)
         {
@@ -79,16 +75,16 @@ namespace PolygonFactoryDemo
                 {
                     double dx = points[i].X - points[j].X;
                     double dy = points[i].Y - points[j].Y;
-                    if (dx * dx + dy * dy <= Tolerance * Tolerance)
+                    if (dx * dx + dy * dy <= ToleranceSq)
                         return true;
                 }
             }
             return false;
         }
 
-        protected static double CrossProductZ(Point2D a, Point2D b, Point2D c)
-            => (b.X - a.X) * (c.Y - a.Y) - (b.Y - a.Y) * (c.X - a.X);
-
+        /// <summary>
+        /// Обчислення орієнтованої площі (sign залежить від напрямку обходу)
+        /// </summary>
         protected static double CalculateArea(IList<Point2D> pts)
         {
             double area = 0;
@@ -101,25 +97,45 @@ namespace PolygonFactoryDemo
             return area / 2.0;
         }
 
-        public abstract string Type { get; }
+        /// <summary>
+        /// Повертає абсолютну площу багатокутника
+        /// </summary>
+        public double Area() => Math.Abs(CalculateArea(Points));
 
-        public override string ToString()
-            => $"{Type} з {Points.Count} вершинами. Периметр = {Perimeter():0.###}";
+        /// <summary>
+        /// Z-компонента векторного добутку для трьох точок
+        /// </summary>
+        private static double CrossZ(Point2D a, Point2D b, Point2D c)
+            => (b.X - a.X) * (c.Y - a.Y) - (b.Y - a.Y) * (c.X - a.X);
 
+        /// <summary>
+        /// Відстань між двома точками
+        /// </summary>
+        private static double Distance(Point2D a, Point2D b)
+            => Math.Sqrt((b.X - a.X) * (b.X - a.X) + (b.Y - a.Y) * (b.Y - a.Y));
+
+        /// <summary>
+        /// Периметр багатокутника
+        /// </summary>
         public double Perimeter()
         {
             double sum = 0;
             for (int i = 0; i < Points.Count; i++)
-            {
-                var a = Points[i];
-                var b = Points[(i + 1) % Points.Count];
-                sum += Math.Sqrt(Math.Pow(b.X - a.X, 2) + Math.Pow(b.Y - a.Y, 2));
-            }
+                sum += Distance(Points[i], Points[(i + 1) % Points.Count]);
             return sum;
         }
+
+        public abstract string Type { get; }
+
+        public override string ToString()
+            => $"{Type} з {Points.Count} вершинами. " +
+               $"Периметр = {Perimeter():0.###}, Площа = {Area():0.###}";
     }
 
-    public class ConvexPolygon : Polygon
+    /// <summary>
+    /// Опуклий багатокутник
+    /// </summary>
+    public sealed class ConvexPolygon : Polygon
     {
         public ConvexPolygon(IEnumerable<Point2D> points) : base(points)
         {
@@ -130,32 +146,41 @@ namespace PolygonFactoryDemo
         public override string Type => "Опуклий багатокутник";
     }
 
-    public class ConcavePolygon : Polygon
+    /// <summary>
+    /// Неопуклий багатокутник
+    /// </summary>
+    public sealed class ConcavePolygon : Polygon
     {
         public ConcavePolygon(IEnumerable<Point2D> points) : base(points)
         {
             if (IsConvex(points.ToList()))
-                throw new InvalidOperationException("Точки утворюють опуклий багатокутник, а не неопуклий.");
+                throw new InvalidOperationException("Точки утворюють опуклий, а не неопуклий багатокутник.");
         }
 
         public override string Type => "Неопуклий багатокутник";
     }
 
     /// <summary>
-    /// Абстрактна фабрика
+    /// Абстрактна фабрика багатокутників
     /// </summary>
     public interface IPolygonFactory
     {
         Polygon CreatePolygon(IEnumerable<Point2D> points);
     }
 
-    public class ConvexPolygonFactory : IPolygonFactory
+    /// <summary>
+    /// Фабрика опуклих багатокутників
+    /// </summary>
+    public sealed class ConvexPolygonFactory : IPolygonFactory
     {
         public Polygon CreatePolygon(IEnumerable<Point2D> points)
             => new ConvexPolygon(points);
     }
 
-    public class ConcavePolygonFactory : IPolygonFactory
+    /// <summary>
+    /// Фабрика неопуклих багатокутників
+    /// </summary>
+    public sealed class ConcavePolygonFactory : IPolygonFactory
     {
         public Polygon CreatePolygon(IEnumerable<Point2D> points)
             => new ConcavePolygon(points);
